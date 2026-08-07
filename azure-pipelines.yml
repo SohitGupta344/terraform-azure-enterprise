@@ -1,0 +1,356 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - main
+
+pool:
+  name: Default
+
+variables:
+  workingDirectory: '$(System.DefaultWorkingDirectory)/environments/dev'
+  workingDirectory1: '$(System.DefaultWorkingDirectory)'
+  backendRG: 'sohit-rg'
+  backendStorage: 'sohittfstate001'
+  backendContainer: 'tfstate'
+  backendKey: 'dev.tfstate'
+  serviceConnection: 'ericsson'
+
+###############################################################
+# PRE-COMMIT
+###############################################################
+
+stages:
+
+- stage: PreCommit
+  displayName: Pre-Commit Validation
+
+  jobs:
+
+  #########################################################
+
+  - job: Validate
+
+    steps:
+
+    - task: TerraformTask@5
+      displayName: Terraform Init
+
+      inputs:
+        provider: azurerm
+        command: init
+        workingDirectory: $(workingDirectory)
+
+        backendServiceArm: $(serviceConnection)
+        backendAzureRmResourceGroupName: $(backendRG)
+        backendAzureRmStorageAccountName: $(backendStorage)
+        backendAzureRmContainerName: $(backendContainer)
+        backendAzureRmKey: $(backendKey)
+
+        commandOptions: -upgrade
+
+    - task: TerraformTask@5
+      displayName: Terraform Validate
+
+      inputs:
+        provider: azurerm
+        command: validate
+        workingDirectory: $(workingDirectory)
+
+#########################################################
+
+  - job: Format
+
+    dependsOn: Validate
+
+    steps:
+
+    - task: PowerShell@2
+
+      displayName: Terraform Format
+
+      inputs:
+        targetType: inline
+
+        script: |
+          Set-Location "$(workingDirectory)"
+
+          terraform fmt -recursive -check
+
+#########################################################
+
+  - job: Gitleaks
+
+    dependsOn: Format
+
+    steps:
+
+    - task: PowerShell@2
+
+      displayName: Gitleaks
+
+      continueOnError: true
+
+      inputs:
+        targetType: inline
+
+        script: |
+
+          Set-Location "$(workingDirectory1)"
+
+          gitleaks detect `
+          --source . `
+          --report-format json `
+          --report-path "$(Build.ArtifactStagingDirectory)\gitleaks.json"
+
+    - publish: $(Build.ArtifactStagingDirectory)/gitleaks.json
+      artifact: gitleaks
+
+#########################################################
+
+  - job: TFLint
+
+    dependsOn: Gitleaks
+
+    steps:
+
+    - task: PowerShell@2
+
+      displayName: TFLint
+
+      continueOnError: true
+
+      inputs:
+
+        targetType: inline
+
+        script: |
+
+          Set-Location "$(workingDirectory)"
+
+          tflint --init
+
+          tflint --recursive --format compact > "$(Build.ArtifactStagingDirectory)\tflint.txt"
+
+    - publish: $(Build.ArtifactStagingDirectory)/tflint.txt
+      artifact: tflint
+
+#########################################################
+
+  - job: TFSEC
+
+    dependsOn: TFLint
+
+    steps:
+
+    - task: PowerShell@2
+
+      displayName: tfsec
+
+      continueOnError: true
+
+      inputs:
+
+        targetType: inline
+
+        script: |
+
+          Set-Location "$(workingDirectory1)"
+
+          tfsec . `
+          --format json `
+          --out "$(Build.ArtifactStagingDirectory)\tfsec.json"
+
+    - publish: $(Build.ArtifactStagingDirectory)/tfsec.json
+      artifact: tfsec
+
+###############################################################
+# INFRACOST
+###############################################################
+
+- stage: InfraCost
+
+  dependsOn: PreCommit
+
+  jobs:
+
+  - job: Infracost
+
+    steps:
+
+    - task: PowerShell@2
+
+      displayName: Infracost
+
+      inputs:
+        targetType: 'inline'
+        script: |
+          Set-Location "$(workingDirectory1)"
+          
+          infracost auth login
+          
+          infracost breakdown `
+          --path . `
+          --format json `
+          --out-file "$(Build.ArtifactStagingDirectory)\infracost.json"
+
+    - publish: $(Build.ArtifactStagingDirectory)/infracost.json
+      artifact: infracost
+
+###############################################################
+# PLAN
+###############################################################
+
+- stage: Plan
+
+  dependsOn: InfraCost
+
+  jobs:
+
+  - job: TerraformPlan
+
+    steps:
+
+    - task: TerraformTask@5
+
+      displayName: Terraform Init
+
+      inputs:
+
+        provider: azurerm
+        command: init
+
+        workingDirectory: $(workingDirectory)
+
+        backendServiceArm: $(serviceConnection)
+        backendAzureRmResourceGroupName: $(backendRG)
+        backendAzureRmStorageAccountName: $(backendStorage)
+        backendAzureRmContainerName: $(backendContainer)
+        backendAzureRmKey: $(backendKey)
+
+    - task: TerraformTask@5
+
+      displayName: Terraform Plan
+
+      inputs:
+
+        provider: azurerm
+        command: plan
+
+        workingDirectory: $(workingDirectory)
+
+        environmentServiceNameAzureRM: $(serviceConnection)
+
+        commandOptions: "-out=tfplan"
+
+    - task: PowerShell@2
+
+      displayName: Verify tfplan
+
+      inputs:
+
+        targetType: inline
+
+        script: |
+
+          Get-ChildItem "$(workingDirectory)"
+
+    - publish: $(workingDirectory)/tfplan
+      artifact: tfplan
+
+###############################################################
+# APPROVAL
+###############################################################
+
+- stage: Approval
+
+  dependsOn: Plan
+
+  jobs:
+
+  - job: ManualApproval
+
+    pool: server
+
+    steps:
+
+    - task: ManualValidation@1
+
+      timeoutInMinutes: 1440
+
+      inputs:
+
+        notifyUsers: |
+          sohitg89@gmail.com
+
+        approvers: |
+          sohitg89@gmail.com
+
+###############################################################
+# APPLY
+###############################################################
+
+- stage: Apply
+
+  dependsOn: Approval
+
+  condition: and(succeeded(),eq(variables['Build.SourceBranch'],'refs/heads/main'))
+
+  jobs:
+
+  - job: TerraformApply
+
+    steps:
+
+    - download: current
+      artifact: tfplan
+
+    - task: PowerShell@2
+
+      displayName: Verify Downloaded tfplan
+
+      inputs:
+
+        targetType: inline
+
+        script: |
+
+          Write-Host "Pipeline Workspace"
+
+          Get-ChildItem "$(Pipeline.Workspace)" -Recurse
+
+    - task: TerraformTask@5
+
+      displayName: Terraform Init
+
+      inputs:
+
+        provider: azurerm
+        command: init
+
+        workingDirectory: $(workingDirectory)
+
+        backendServiceArm: $(serviceConnection)
+        backendAzureRmResourceGroupName: $(backendRG)
+        backendAzureRmStorageAccountName: $(backendStorage)
+        backendAzureRmContainerName: $(backendContainer)
+        backendAzureRmKey: $(backendKey)
+
+    - task: TerraformTask@5
+
+      displayName: Terraform Apply
+
+      inputs:
+
+        provider: azurerm
+        command: apply
+
+        workingDirectory: $(workingDirectory)
+
+        environmentServiceNameAzureRM: $(serviceConnection)
+
+        commandOptions: '"$(Pipeline.Workspace)/tfplan/tfplan"'
