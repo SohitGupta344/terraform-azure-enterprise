@@ -28,7 +28,6 @@ stages:
 
 - stage: PreCommit
   displayName: Pre-Commit Validation
-  condition: false
 
   jobs:
 
@@ -174,7 +173,7 @@ stages:
 ###############################################################
 
 - stage: InfraCost
-  dependsOn: []
+  dependsOn: PreCommit
 
   jobs:
 
@@ -217,7 +216,6 @@ stages:
 ###############################################################
 
 - stage: Plan
-  condition: false
 
   dependsOn: InfraCost
 
@@ -279,7 +277,6 @@ stages:
 ###############################################################
 
 - stage: Approval
-  condition: false
 
   dependsOn: Plan
 
@@ -308,9 +305,10 @@ stages:
 ###############################################################
 
 - stage: Apply
-  condition: false
 
   dependsOn: Approval
+  
+  condition: and(succeeded(),eq(variables['Build.SourceBranch'],'refs/heads/main'))
 
   jobs:
 
