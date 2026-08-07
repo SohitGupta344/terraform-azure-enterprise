@@ -181,42 +181,18 @@ stages:
 
     steps:
 
-    - task: TerraformTask@5
-      displayName: Terraform Init
-      inputs:
-        provider: azurerm
-        command: init
-        workingDirectory: $(workingDirectory)
-        backendServiceArm: $(serviceConnection)
-        backendAzureRmResourceGroupName: $(backendRG)
-        backendAzureRmStorageAccountName: $(backendStorage)
-        backendAzureRmContainerName: $(backendContainer)
-        backendAzureRmKey: $(backendKey)
-
-    - task: TerraformTask@5
-      displayName: Terraform Plan
-      inputs:
-        provider: azurerm
-        command: plan
-        workingDirectory: $(workingDirectory)
-        environmentServiceNameAzureRM: $(serviceConnection)
-        commandOptions: "-out=tfplan"
-
     - task: PowerShell@2
-      displayName: Convert Plan and run Infracost
+      displayName: Infracost
       inputs:
         targetType: 'inline'
         script: |
           Set-Location "$(workingDirectory)"
           
-          # Convert tfplan to JSON
-          terraform show -json tfplan > tfplan.json
-          
-          # Run Infracost
           infracost auth login
           
           infracost breakdown `
-          --path tfplan.json `
+          --path . `
+          --terraform-var-file terraform.tfvars `
           --format json `
           --out-file "$(Build.ArtifactStagingDirectory)\infracost.json"
 
