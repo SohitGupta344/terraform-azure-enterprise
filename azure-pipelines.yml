@@ -189,7 +189,7 @@ stages:
       inputs:
         targetType: 'inline'
         script: |
-          Set-Location "$(workingDirectory1)"
+          Set-Location "$(workingDirectory)"
           
           infracost auth login
           
